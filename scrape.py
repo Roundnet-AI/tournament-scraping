@@ -189,21 +189,48 @@ class ClickNRunClient(RequestsClient):
     def __init__(self):
         super().__init__("https://clickn.run/")
 
-    def get_tournaments(self):
+    def get_tournaments(self, **kwargs):
         base_url = self.url + "api/competitions?query=raceAggregationDetails.trackTypes.subtype:eq:roundnet&projection=coreDetails,raceAggregationDetails"
         response = self._get(base_url)
-        for tournament in response["competitions"]["competitions"]:
-            location = tournament["coreDetails"]["location"]
+        for tournament in response["competitions"]:
+            location = None
+            if "location" in tournament["coreDetails"]:
+                location = tournament["coreDetails"]["location"]
+                location = f"{location['locality']}, {location['administrativeArea']}, {location['country']}"
+            event_id = f"{tournament['_id']['baseCompetitionId']}/{tournament['_id']['editionId']}"
+            players = self.get_players(event_id)
             self.tournaments.append({
                 "date": tournament["coreDetails"]["dateRange"]["start"],
                 "name": tournament["coreDetails"]["name"],
-                "location": f"{location['locality']}, {location['administrativeArea']}, {location['country']}",
+                "location": location,
                 "competitors": tournament["raceAggregationDetails"]["registrationsSummary"]["participants"]["current"],
-                "url": f"{self.url}en/events/{tournament['_id']['baseCompetitionId']}/{tournament['_id']['editionId']}"
+                "url": f"{self.url}en/events/{event_id}",
+                "players": players
             })
 
-    def get_players(self):
-        base_url = self.url + "api/calendars/roundnet-spain?projection=_id,mass"
+    def get_players(self, event_id: str):
+        for tournament in self.tournaments:
+            base_url = self.url + f"api/competitions/{event_id}?projection=_id,mass"
+            response = self._get(base_url)
+            players = {}
+            for _, player in response["mass"]["participants"].items():
+                try:
+                    last_name = player["coreDetails"]["lastName"].lower()
+                    first_name = player["coreDetails"]["firstName"].lower()
+                except KeyError:
+                    continue
+                full_name = f"{first_name} {last_name}"
+                if full_name not in players:
+                    players[full_name] = 1
+                else:
+                    players[full_name] += 1
+            return players
+
+    def save_tournaments(self, filename: str = "data/full/clicknrun_tournaments.json"):
+        return super().save_tournaments(filename)
+    
+    def save_players(self, filename: str = "data/clicknrun_players.json"):
+        return super().save_players(filename)
 
 # class PlayerZoneClient():
 #     def __init__(self):
@@ -211,12 +238,15 @@ class ClickNRunClient(RequestsClient):
         
 
 if __name__ == "__main__":
-    months_unix = UnixMonths()
-    for month in months_unix.data:
-        client = FwangoClient()
-        client.scrape(
-            start=month["start"],
-            end=month["end"],
-            tournaments_filename=f"data/fwango_tournaments_{month['month']}_{month['year']}.json",
-            players_filename=f"data/fwango_players_{month['month']}_{month['year']}.json"
-        )
+    # months_unix = UnixMonths()
+    # for month in months_unix.data:
+    #     client = FwangoClient()
+    #     client.scrape(
+    #         start=month["start"],
+    #         end=month["end"],
+    #         tournaments_filename=f"data/fwango_tournaments_{month['month']}_{month['year']}.json",
+    #         players_filename=f"data/fwango_players_{month['month']}_{month['year']}.json"
+    #     )
+
+    client = ClickNRunClient()
+    client.scrape()
