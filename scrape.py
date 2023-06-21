@@ -59,35 +59,24 @@ class RoundnetScrapingClient():
     def __init__(self, url: str):
         self.url = url
         self.tournaments = []
-        self.players = {}
 
     def scrape(self, **kwargs):
         tournaments_filename = kwargs.get("tournaments_filename", "tournaments.json")
-        players_filename = kwargs.get("players_filename", "players.json")
         try:
             self.get_tournaments(
                 start=kwargs.get("start", 0),
                 end=kwargs.get("end", 0),
             )
-            self.get_players()
         except Exception as e:
             self.save_tournaments(tournaments_filename)
-            self.save_players(players_filename)
             raise e
         self.save_tournaments(tournaments_filename)
-        self.save_players(players_filename)
 
     def save_tournaments(self, filename: str="tournaments.json"):
         path = Path(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(self.tournaments, f, indent=4)
-
-    def save_players(self, filename: str="players.json"):
-        path = Path(filename)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.players, f, indent=4)
 
 class RequestsClient(RoundnetScrapingClient):
     def __init__(self, url: str):
@@ -145,12 +134,14 @@ class FwangoClient(SeleniumClient):
                 except:
                     competitors = None
                 tournament_url = tournament.find_element(By.XPATH, "..").get_attribute("href")
+                players = self.get_players(tournament_url)
                 self.tournaments.append({
                     "date": date,
                     "name": tournament_name,
                     "location": geo,
                     "competitors": competitors,
-                    "url": tournament_url
+                    "url": tournament_url,
+                    "players": players,
                 })
                 pbar.update()
             page += 1
@@ -159,31 +150,27 @@ class FwangoClient(SeleniumClient):
             self._driver.implicitly_wait(5)
         pbar.close()
 
-    def get_players(self):
-        for tournament in tqdm(self.tournaments):
-            self._driver.get(tournament["url"])
-            self._driver.implicitly_wait(5)
-            teams_with_dupes = []
-            while True:
-                visible_teams = self._driver.find_elements(By.CLASS_NAME, "players")
-                if len(visible_teams) == 0 or visible_teams[-1].text in teams_with_dupes:
-                    break
-                teams_with_dupes.extend([p.text for p in visible_teams])
-                self._driver.execute_script("arguments[0].scrollIntoView(true);", visible_teams[-1])
-                time.sleep(.5)
-            split = [t.split(" and ") for t in teams_with_dupes]
-            players = {item.lower() for sublist in split for item in sublist}
-            for player in players:
-                if player not in self.players:
-                    self.players[player] = 1
-                else:
-                    self.players[player] += 1
+    def get_players(self, url: str) -> "list[str]":
+        self._driver.execute_script("window.open('');")
+        self._driver.switch_to.window(self._driver.window_handles[1])
+        self._driver.get(url)
+        self._driver.implicitly_wait(5)
+        teams_with_dupes = []
+        while True:
+            visible_teams = self._driver.find_elements(By.CLASS_NAME, "players")
+            if len(visible_teams) == 0 or visible_teams[-1].text in teams_with_dupes:
+                break
+            teams_with_dupes.extend([p.text for p in visible_teams])
+            self._driver.execute_script("arguments[0].scrollIntoView(true);", visible_teams[-1])
+            time.sleep(.5)
+        split = [t.split(" and ") for t in teams_with_dupes]
+        players = {p.lower() for t in split for p in t}
+        self._driver.close()
+        self._driver.switch_to.window(self._driver.window_handles[0])
+        return list(players)
 
     def save_tournaments(self, filename: str = "data/fwango_tournaments.json"):
         return super().save_tournaments(filename)
-    
-    def save_players(self, filename: str = "data/fwango_players.json"):
-        return super().save_players(filename)
 
 class ClickNRunClient(RequestsClient):
     def __init__(self):
@@ -192,7 +179,7 @@ class ClickNRunClient(RequestsClient):
     def get_tournaments(self, **kwargs):
         base_url = self.url + "api/competitions?query=raceAggregationDetails.trackTypes.subtype:eq:roundnet&projection=coreDetails,raceAggregationDetails"
         response = self._get(base_url)
-        for tournament in response["competitions"]:
+        for tournament in tqdm(response["competitions"]):
             location = None
             if "location" in tournament["coreDetails"]:
                 location = tournament["coreDetails"]["location"]
@@ -208,45 +195,76 @@ class ClickNRunClient(RequestsClient):
                 "players": players
             })
 
-    def get_players(self, event_id: str):
-        for tournament in self.tournaments:
-            base_url = self.url + f"api/competitions/{event_id}?projection=_id,mass"
-            response = self._get(base_url)
-            players = {}
-            for _, player in response["mass"]["participants"].items():
-                try:
-                    last_name = player["coreDetails"]["lastName"].lower()
-                    first_name = player["coreDetails"]["firstName"].lower()
-                except KeyError:
-                    continue
-                full_name = f"{first_name} {last_name}"
-                if full_name not in players:
-                    players[full_name] = 1
-                else:
-                    players[full_name] += 1
-            return players
+    def get_players(self, event_id: str) -> "list[str]":
+        base_url = self.url + f"api/competitions/{event_id}?projection=_id,mass"
+        response = self._get(base_url)
+        players = []
+        for _, player in response["mass"]["participants"].items():
+            try:
+                last_name = player["coreDetails"]["lastName"].lower()
+                first_name = player["coreDetails"]["firstName"].lower()
+            except KeyError:
+                continue
+            full_name = f"{first_name} {last_name}"
+            players.append(full_name)
+        return players
 
-    def save_tournaments(self, filename: str = "data/full/clicknrun_tournaments.json"):
+    def save_tournaments(self, filename: str = "data/clicknrun_tournaments.json"):
         return super().save_tournaments(filename)
-    
-    def save_players(self, filename: str = "data/clicknrun_players.json"):
-        return super().save_players(filename)
 
-# class PlayerZoneClient():
-#     def __init__(self):
-#         super().__init__("https://playerzone.in/")
+class PlayerZoneClient(SeleniumClient):
+    def __init__(self):
+        super().__init__("https://playerzone.roundnetgermany.de/tournaments")
+
+    def get_tournaments(self, **kwargs):
+        self._driver.get(self.url)
+        self._driver.implicitly_wait(5)
+        self._driver.find_element(By.XPATH, "//*[@id='tournaments']/div/div[1]/div[2]/a/span").click()
+        # Select "All" from the dropdown (//*[@id="id_region_container"]/div)
+        self._driver.find_element(By.XPATH, "//*[@id='id_region_container']/div").click()
+        self._driver.find_element(By.XPATH, "//*[@id='id_region_container']/div/div[2]/div[3]").click()
+        self._driver.find_element(By.XPATH, "//*[@id='filter-form']/div[3]/button").click()
+        self._driver.implicitly_wait(5)
+        pagination = self._driver.find_elements(By.XPATH, "//*[@id='tournaments']/ul[2]")
+        pages = int(pagination[0].text.split(" ")[-2])
+        for page in tqdm(range(1, pages + 1)):
+            url = f"{self.url}?page={page}"
+            self._driver.get(url)
+            self._driver.implicitly_wait(5)
+            self._scroll_to_bottom()
+            tournaments = self._driver.find_elements(By.XPATH, "//*[@id='tournaments']/ul[1]")
+            for tournament in tournaments:
+                date_geo = tournament.find_element(By.CLASS_NAME, "tournament-date").text
+                date = date_geo.split(", ")[0]
+                geo = date_geo.split(", ")[1]
+                tournament_name = tournament.find_element(By.CLASS_NAME, "tournament-title").text
+                competitors = int(tournament.find_element(By.CLASS_NAME, "tournament-team-count").text.split(" ")[1].split("/")[0])
+                self.tournaments.append({
+                    "date": date,
+                    "name": tournament_name,
+                    "location": geo,
+                    "competitors": competitors * 2,
+                    "url": None,
+                    "players": None,
+                })
+
+    def save_tournaments(self, filename: str = "data/playerzone_tournaments.json"):
+        return super().save_tournaments(filename)
         
 
 if __name__ == "__main__":
-    # months_unix = UnixMonths()
-    # for month in months_unix.data:
-    #     client = FwangoClient()
-    #     client.scrape(
-    #         start=month["start"],
-    #         end=month["end"],
-    #         tournaments_filename=f"data/fwango_tournaments_{month['month']}_{month['year']}.json",
-    #         players_filename=f"data/fwango_players_{month['month']}_{month['year']}.json"
-    #     )
+    # client = ClickNRunClient()
+    # client.scrape(
+    #     tournaments_filename="data/clicknrun_tournaments_20230620.json",
+    # )
 
-    client = ClickNRunClient()
-    client.scrape()
+    # client = PlayerZoneClient()
+    # client.scrape(
+    #     tournaments_filename="data/playerzone_tournaments_20230620.json",
+    # )
+
+    client = FwangoClient()
+    client.scrape(
+        start=1577865600000,
+        tournaments_filename="data/fwango_tournaments_20230620.json",
+    )
